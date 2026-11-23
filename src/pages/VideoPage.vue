@@ -1,0 +1,1594 @@
+<template>
+  <div class="video-page">
+    <!-- Player mode -->
+    <div
+      v-if="mode === 'play'"
+      class="player-mode"
+    >
+      <header class="player-header">
+        <button
+          class="back-btn"
+          @click="exitPlayer"
+        >
+          <span class="material-symbols-outlined">arrow_back</span>
+          Back to library
+        </button>
+        <h1>{{ currentVideoName }}</h1>
+      </header>
+
+      <div class="track-bar">
+        <label class="track-field">
+          <span class="track-label">Audio</span>
+          <select
+            v-model="audioChoice"
+            :disabled="!probeInfo || starting"
+            @change="onTrackChange"
+          >
+            <option
+              v-for="a in probeInfo?.audio ?? []"
+              :key="a.index"
+              :value="a.index"
+            >
+              {{ audioLabel(a) }}
+            </option>
+          </select>
+        </label>
+        <label class="track-field">
+          <span class="track-label">Subtitles</span>
+          <select
+            v-model="subtitleChoice"
+            :disabled="!probeInfo || starting"
+            @change="onTrackChange"
+          >
+            <option :value="-1">Off</option>
+            <option
+              v-for="s in probeInfo?.subtitles ?? []"
+              :key="s.index"
+              :value="s.index"
+            >
+              {{ subtitleLabel(s) }}
+            </option>
+          </select>
+        </label>
+        <span
+          v-if="starting"
+          class="hint"
+        >Starting stream…</span>
+      </div>
+
+      <div class="video-container">
+        <video
+          ref="videoRef"
+          class="video"
+          controls
+          playsinline
+          @error="onError"
+          @loadedmetadata="onLoadedMetadata"
+          @ended="onVideoEnded"
+          @pause="onVideoPause"
+          @seeking="onVideoSeeking"
+          @waiting="onVideoWaiting"
+          @playing="onVideoPlaying"
+          @canplay="onVideoPlaying"
+        >
+          <track
+            v-if="subtitleTrackUrl"
+            :key="subtitleTrackUrl"
+            kind="subtitles"
+            :label="selectedSubtitleLabel"
+            :src="subtitleTrackUrl"
+            default
+            @load="onSubtitleLoaded"
+          />
+          Your browser does not support the video tag.
+        </video>
+        <div
+          v-if="loading"
+          class="loading-overlay"
+        >
+          <div class="spinner" />
+          <p>{{ loadingMessage }}</p>
+          <p
+            v-if="loadingElapsed >= 3"
+            class="overlay-detail"
+          >
+            Still working — {{ loadingElapsed }}s elapsed
+          </p>
+        </div>
+        <div
+          v-else-if="buffering"
+          class="loading-overlay buffer-overlay"
+        >
+          <div class="spinner" />
+          <p>Preparing video…</p>
+          <p class="overlay-detail">{{ bufferDetail }}</p>
+          <div class="overlay-progress">
+            <div
+              class="overlay-progress-fill"
+              :style="{ width: bufferPercent + '%' }"
+            />
+          </div>
+        </div>
+        <div
+          v-if="error"
+          class="error-overlay"
+        >
+          <p class="material-symbols-outlined">error</p>
+          <p>{{ error }}</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Library mode -->
+    <div
+      v-else
+      class="library-mode"
+    >
+      <div
+        v-if="loadingLibrary"
+        class="status"
+      >
+        Loading library…
+      </div>
+      <div
+        v-else-if="libraryError"
+        class="error"
+      >
+        {{ libraryError }}
+      </div>
+      <template v-else>
+        <!-- Movies section -->
+        <section
+          v-if="movies.length"
+          class="section"
+        >
+          <h2 class="section-title">Movies</h2>
+          <div class="poster-grid">
+            <div
+              v-for="m in movies"
+              :key="m.encodedPath"
+              class="poster-card"
+              tabindex="0"
+              @click="playFromLibrary(m.playPath)"
+              @keydown.enter="playFromLibrary(m.playPath)"
+            >
+              <img
+                :src="m.posterUrl"
+                :alt="m.title"
+                loading="lazy"
+                class="poster-img"
+                @error="(e) => onPosterError(e)"
+              />
+              <div class="poster-info">
+                <span class="poster-title">{{ m.title }}</span>
+                <span
+                  v-if="m.year"
+                  class="poster-year"
+                >{{ m.year }}</span>
+                <span v-if="isWatched(m.playPath)" class="poster-sub">Watched</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Series section -->
+        <section
+          v-if="seasons.length"
+          class="section"
+        >
+          <h2 class="section-title">Series</h2>
+          <section v-for="group in seriesGroups" :key="group.key" class="series-group">
+            <h3>{{ group.title }}<span v-if="group.year"> ({{ group.year }})</span></h3>
+            <div class="poster-grid">
+              <button
+                v-for="season in group.seasons"
+                :key="`${season.encodedPath}:${season.seasonNumber}`"
+                class="poster-card season-card"
+                type="button"
+                @click="showEpisodes(season)"
+              >
+                <img
+                  :src="season.posterUrl"
+                  alt=""
+                  loading="lazy"
+                  class="poster-img"
+                  @error="onPosterError"
+                />
+                <span class="poster-info">
+                  <span class="poster-title">Season {{ season.seasonNumber }}</span>
+                </span>
+              </button>
+            </div>
+          </section>
+        </section>
+
+        <div
+          v-if="!movies.length && !seasons.length"
+          class="empty"
+        >
+          No videos found.
+        </div>
+      </template>
+
+      <!-- Episode overlay -->
+      <div
+        v-if="episodeOverlay"
+        class="episode-overlay"
+        @click.self="episodeOverlay = null"
+      >
+        <div class="episode-dialog">
+          <div class="episode-header">
+            <h2>{{ episodeOverlay.title }} — Season {{ episodeOverlay.season }}</h2>
+            <button
+              class="close-btn"
+              @click="episodeOverlay = null"
+            >
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+          <div
+            v-if="loadingEpisodes"
+            class="status"
+          >
+            Loading episodes…
+          </div>
+          <div
+            v-else
+            class="episode-list"
+          >
+            <button
+              v-for="ep in episodes"
+              :key="ep.encodedPath"
+              class="episode-item"
+              :title="ep.fileName"
+              @click="playFromLibrary(ep.encodedPath)"
+            >
+              <span class="episode-badge">{{ episodeBadge(ep) }}</span>
+              <span class="episode-main">
+                <span class="episode-name">{{ episodeLabel(ep) }}</span>
+                <span class="episode-file">{{ ep.fileName }}</span>
+              </span>
+              <span
+                v-if="isWatched(ep.encodedPath)"
+                class="episode-watched"
+              >Watched</span>
+              <span class="episode-size">{{ formatSize(ep.size) }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { apiGet, apiPost } from "../services/api";
+import Hls from "hls.js";
+
+// --- Types ---
+interface LibraryMovie {
+  title: string;
+  year: number | null;
+  encodedPath: string;
+  playPath: string;
+  posterUrl: string;
+}
+interface LibrarySeason {
+  title: string;
+  year: number | null;
+  seasonNumber: number;
+  encodedPath: string;
+  posterUrl: string;
+}
+interface LibraryResponse {
+  movies: LibraryMovie[];
+  seasons: LibrarySeason[];
+}
+interface EpisodeInfo {
+  season: number | null;
+  episode: number | null;
+  title: string | null;
+  fileName: string;
+  size: number;
+  encodedPath: string;
+}
+interface EpisodesResponse {
+  episodes: EpisodeInfo[];
+}
+interface ProbeVideoStream {
+  index: number;
+  codec: string;
+  width: number | null;
+  height: number | null;
+}
+interface ProbeAudioStream {
+  index: number;
+  codec: string;
+  language: string | null;
+  title: string | null;
+  isDefault: boolean;
+}
+interface ProbeSubtitleStream {
+  index: number;
+  codec: string;
+  language: string | null;
+  title: string | null;
+  isDefault: boolean;
+  canDeliverAsVtt: boolean;
+  isForced?: boolean;
+  isHearingImpaired?: boolean;
+}
+interface ProbeResponse {
+  container: string;
+  durationSeconds: number;
+  video: ProbeVideoStream[];
+  audio: ProbeAudioStream[];
+  subtitles: ProbeSubtitleStream[];
+}
+interface StartStreamResponse {
+  sessionId: string;
+  playlistUrl: string;
+  transcoding: boolean;
+  subtitleBurnIn: boolean;
+  subtitleUrl: string | null;
+  // Timeline position where real content begins. > 0 when the server padded
+  // the playlist head with placeholders (browser timeline = absolute source
+  // timeline); 0 (or absent on an older backend) when the stream covers the
+  // whole file and the client must seek the browser itself.
+  startOffsetSeconds?: number;
+}
+
+const route = useRoute();
+const router = useRouter();
+
+// --- Library state ---
+const mode = ref<"browse" | "play">("browse");
+const movies = ref<LibraryMovie[]>([]);
+const seasons = ref<LibrarySeason[]>([]);
+const seriesGroups = computed(() => {
+  const groups = new Map<string, {
+    key: string;
+    title: string;
+    year: number | null;
+    seasons: LibrarySeason[];
+  }>();
+  for (const season of seasons.value) {
+    const key = JSON.stringify([season.title, season.year]);
+    let group = groups.get(key);
+    if (!group) {
+      group = { key, title: season.title, year: season.year, seasons: [] };
+      groups.set(key, group);
+    }
+    group.seasons.push(season);
+  }
+  return [...groups.values()];
+});
+const loadingLibrary = ref(false);
+const libraryError = ref<string | null>(null);
+const currentVideoName = ref("");
+
+// --- Episode overlay ---
+const episodeOverlay = ref<{ title: string; season: number; encodedPath: string } | null>(null);
+const episodes = ref<EpisodeInfo[]>([]);
+const loadingEpisodes = ref(false);
+
+// --- Player state ---
+const videoRef = ref<HTMLVideoElement | null>(null);
+const loading = ref(false);
+const loadingMessage = ref("Loading video…");
+// Ticks once a second while a load/start is in flight so long waits visibly
+// progress instead of looking frozen.
+const loadingElapsed = ref(0);
+const error = ref<string | null>(null);
+const starting = ref(false);
+// Playback is stalled waiting for the pipeline to produce media at the
+// current position (subtitle burn-in sessions decode from zero, so seeking
+// into them waits for ffmpeg to catch up). Shows real catch-up progress.
+const buffering = ref(false);
+const bufferHead = ref(0);
+const bufferTarget = ref(0);
+const probeInfo = ref<ProbeResponse | null>(null);
+const audioChoice = ref<number>(-1);
+const subtitleChoice = ref<number>(-1);
+const sessionId = ref<string | null>(null);
+const subtitleTrackUrl = ref<string | null>(null);
+let hls: Hls | null = null;
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let saveTimer: ReturnType<typeof setInterval> | null = null;
+let loadingTimer: ReturnType<typeof setInterval> | null = null;
+let bufferDelayTimer: ReturnType<typeof setTimeout> | null = null;
+let bufferPollTimer: ReturnType<typeof setInterval> | null = null;
+// Bumped whenever catch-up state is cleared: show/poll work awaiting a fetch
+// must not re-create timers or overlays once a later clear has run.
+let bufferEpoch = 0;
+let resumeTime = 0;
+// Timeline position where real content begins. > 0 when the server padded
+// the playlist head with placeholder segments so the browser timeline is the
+// absolute source timeline (0..full duration) — currentTime is then already
+// the absolute position everywhere (progress, seek bar, seek-back restarts).
+// 0 means the timeline covers the whole file from zero (no resume, subtitle
+// burn-in, placeholder failure or an older backend) and the client must
+// perform the initial browser seek itself.
+let streamContentStart = 0;
+// Whether the pipeline burns subtitles in: such sessions decode from zero
+// (the subtitles filter needs source-aligned timestamps) and cannot
+// input-seek to a resume or seek target.
+let streamBurnIn = false;
+// Debounced seek decision in flight (see onVideoSeeking).
+let seekTimer: ReturnType<typeof setTimeout> | null = null;
+// A settled seek that arrived while a restart was in flight; applied once
+// the new stream has started (so late seeks are deferred, not lost).
+let pendingSeekTarget: number | null = null;
+// Last restartAt target/time: sessions that cannot pad their head would
+// otherwise loop (browser seek → beyond head → restart → …).
+let lastRestartTarget = -1;
+let lastRestartTime = 0;
+// Restart cooldown with a deferred re-resolve: at most one session restart per
+// window regardless of target. A stalled session retried with a moving playhead
+// passed the same-target guard on every step, so the media pipeline was torn
+// down and re-attached faster than it could recover (each cycle fired
+// pause/play, churned the browser's media stack and reset playback
+// triggers). Later seeks are deferred and re-resolved once the window closes —
+// resolveSeek re-checks the produced head first, so a stream that has caught up
+// costs nothing.
+let restartCooldownTimer: ReturnType<typeof setTimeout> | null = null;
+let deferredRestartTarget: number | null = null;
+// Path captured when playback loads. Progress/watched keys must use this
+// rather than the live route computed: by the time unmount or a stray timer
+// tick runs, the route may already point at a different (or no) video.
+const currentPath = ref("");
+
+// --- Loading / buffering feedback ---
+function beginLoading(message: string) {
+  loading.value = true;
+  loadingMessage.value = message;
+  loadingElapsed.value = 0;
+  if (loadingTimer) clearInterval(loadingTimer);
+  loadingTimer = setInterval(() => {
+    loadingElapsed.value += 1;
+  }, 1000);
+  endBuffering();
+}
+
+function endLoading() {
+  loading.value = false;
+  if (loadingTimer) {
+    clearInterval(loadingTimer);
+    loadingTimer = null;
+  }
+}
+
+function endBuffering() {
+  bufferEpoch += 1;
+  buffering.value = false;
+  if (bufferDelayTimer) {
+    clearTimeout(bufferDelayTimer);
+    bufferDelayTimer = null;
+  }
+  if (bufferPollTimer) {
+    clearInterval(bufferPollTimer);
+    bufferPollTimer = null;
+  }
+}
+
+// The produced head of one specific session: callers pin the id so a restart
+// mid-fetch cannot label the current stream with the old session's state.
+async function fetchStreamHead(id: string): Promise<number | null> {
+  try {
+    const res = await apiGet<{ headSeconds: number | null }>(`stream/${id}/head`);
+    return typeof res.headSeconds === "number" ? res.headSeconds : null;
+  } catch {
+    return null;
+  }
+}
+
+// The video fires `waiting` for any stall; only treat it as catch-up work when
+// media at the position is genuinely not produced yet (brief stalls play again
+// on their own and must not flash an overlay).
+function scheduleBufferCheck() {
+  if (loading.value || buffering.value) return;
+  if (bufferDelayTimer) clearTimeout(bufferDelayTimer);
+  bufferDelayTimer = setTimeout(() => {
+    bufferDelayTimer = null;
+    void beginBuffering();
+  }, 700);
+}
+
+async function beginBuffering() {
+  if (loading.value || starting.value || buffering.value) return;
+  const id = sessionId.value;
+  if (!id) return;
+  const target = videoRef.value?.currentTime ?? 0;
+  const epoch = bufferEpoch;
+  const head = await fetchStreamHead(id);
+  // Re-check after the await: playback may have resumed, a restart may have
+  // swapped the session, or cleanup may have run meanwhile. An unknown head is
+  // never rendered as progress.
+  if (epoch !== bufferEpoch || sessionId.value !== id) return;
+  if (loading.value || starting.value || head === null || target <= head + 2) return;
+  bufferTarget.value = target;
+  bufferHead.value = head;
+  buffering.value = true;
+  if (bufferPollTimer) clearInterval(bufferPollTimer);
+  bufferPollTimer = setInterval(() => void tickBufferHead(id), 1000);
+}
+
+// Hide only once the target itself is produced: the segment containing it is
+// published at that point and playback resumes within an hls.js retry.
+async function tickBufferHead(id: string) {
+  const head = await fetchStreamHead(id);
+  if (!buffering.value) return;
+  if (sessionId.value !== id) {
+    endBuffering();
+    return;
+  }
+  if (head === null) return;
+  bufferHead.value = head;
+  if (head >= bufferTarget.value) endBuffering();
+}
+
+function onVideoWaiting() {
+  scheduleBufferCheck();
+}
+
+function onVideoPlaying() {
+  endBuffering();
+}
+
+const bufferDetail = computed(() => {
+  const total = probeInfo.value?.durationSeconds ?? 0;
+  const ready = `Ready through ${formatTime(bufferHead.value)}${total > 0 ? ` of ${formatTime(total)}` : ""}`;
+  return bufferTarget.value > bufferHead.value
+    ? `${ready} · waiting for ${formatTime(bufferTarget.value)}`
+    : ready;
+});
+
+const bufferPercent = computed(() => {
+  const total = probeInfo.value?.durationSeconds ?? 0;
+  if (total <= 0) return 0;
+  return Math.min(100, (bufferHead.value / total) * 100);
+});
+
+// --- Progress persistence ---
+function progressKey() {
+  return `video-progress:${currentPath.value}`;
+}
+// Watched flags mirror the progress keys and are written when a video is
+// effectively finished (ended, or stopped beyond 98%). The episode dialog
+// reads them to badge what has already been seen.
+function isWatched(path: string): boolean {
+  return localStorage.getItem(`video-watched:${path}`) === "1";
+}
+function markWatched() {
+  localStorage.setItem(`video-watched:${currentPath.value}`, "1");
+}
+function saveProgress() {
+  const v = videoRef.value;
+  if (!v || v.currentTime < 1) return;
+  // The HLS timeline is the absolute source timeline (the server pads the
+  // head with placeholders when the pipeline was input-seeked), so the
+  // browser's currentTime is already the position in the source file.
+  const absolute = Math.floor(v.currentTime);
+  // Don't save if we're near the end (>95% complete) — credits can run long,
+  // so treat reaching them as having watched the episode.
+  const total = probeInfo.value?.durationSeconds ?? 0;
+  const fraction = total > 0
+    ? absolute / total
+    : v.duration > 0 ? v.currentTime / v.duration : 0;
+  if (fraction > 0.95) {
+    markWatched();
+    clearProgress();
+    return;
+  }
+  localStorage.setItem(progressKey(), String(absolute));
+}
+function loadProgress(): number {
+  const raw = localStorage.getItem(progressKey());
+  if (!raw) return 0;
+  const t = parseInt(raw, 10);
+  // Re-enter before the saved point to restore scene context and absorb
+  // timestamp differences between browser playback and HLS segments.
+  return isNaN(t) ? 0 : Math.max(0, t - 30);
+}
+function clearProgress() {
+  localStorage.removeItem(progressKey());
+}
+function onVideoEnded() {
+  markWatched();
+  clearProgress();
+}
+function onVideoPause() {
+  if (!videoRef.value?.ended) saveProgress();
+}
+function startSaveTimer() {
+  stopSaveTimer();
+  saveTimer = setInterval(saveProgress, 10_000);
+}
+function stopSaveTimer() {
+  if (saveTimer) {
+    clearInterval(saveTimer);
+    saveTimer = null;
+  }
+}
+
+const encodedPath = computed<string>(() => {
+  const m = route.params.pathMatch;
+  if (!m) return "";
+  return Array.isArray(m) ? (m as string[]).filter(Boolean).join("/") : String(m);
+});
+
+// --- Library logic ---
+async function loadLibrary() {
+  loadingLibrary.value = true;
+  libraryError.value = null;
+  try {
+    const res = await apiGet<LibraryResponse>("stream/library");
+    movies.value = res.movies ?? [];
+    seasons.value = res.seasons ?? [];
+  } catch (e: unknown) {
+    libraryError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    loadingLibrary.value = false;
+  }
+}
+
+function playFromLibrary(path: string) {
+  router.push(`/video/${path}`);
+}
+
+async function showEpisodes(s: LibrarySeason) {
+  episodeOverlay.value = { title: s.title, season: s.seasonNumber, encodedPath: s.encodedPath };
+  loadingEpisodes.value = true;
+  episodes.value = [];
+  try {
+    // Pass the season so a "Season 2" card that points at a shared series
+    // folder (no per-season subfolder) lists only that season's files.
+    const res = await apiGet<EpisodesResponse>(
+      `stream/episodes/${s.encodedPath}?season=${s.seasonNumber}`,
+    );
+    episodes.value = res.episodes ?? [];
+  } catch {
+    episodes.value = [];
+  } finally {
+    loadingEpisodes.value = false;
+  }
+}
+
+// Human-friendly "S1E2"-style badge for the left of each row.
+function episodeBadge(ep: EpisodeInfo): string {
+  if (ep.season == null && ep.episode == null) return "EP";
+  return `S${ep.season ?? "?"}E${ep.episode ?? "?"}`;
+}
+
+// Primary label: the parsed descriptive title when available, otherwise a
+// simple "Episode N". Falls back to the cleaned file name if neither season
+// nor episode could be determined.
+function episodeLabel(ep: EpisodeInfo): string {
+  if (ep.title) return ep.title;
+  if (ep.episode != null) return `Episode ${ep.episode}`;
+  return ep.fileName;
+}
+
+function onPosterError(e: Event) {
+  const img = e.target as HTMLImageElement;
+  img.style.display = "none";
+  const card = img.parentElement;
+  if (card) card.classList.add("no-poster");
+}
+
+function formatSize(n: number): string {
+  if (!n) return "—";
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 10 ? 0 : 1)} ${units[i]}`;
+}
+
+// m:ss, or h:mm:ss past an hour.
+function formatTime(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
+  return `${h > 0 ? `${h}:` : ""}${mm}:${String(sec).padStart(2, "0")}`;
+}
+
+// --- Player logic ---
+function audioLabel(a: ProbeAudioStream): string {
+  const lang = a.language && a.language !== "und" ? a.language : "Unknown language";
+  const title = a.title ? ` — ${a.title}` : "";
+  const details = a.isDefault ? " [default]" : "";
+  return `Track ${a.index} — ${lang} (${a.codec})${title}${details}`;
+}
+
+function subtitleLabel(s: ProbeSubtitleStream): string {
+  const lang = s.language && s.language !== "und" ? s.language : "Unknown language";
+  const title = s.title ? ` — ${s.title}` : "";
+  const burn = s.canDeliverAsVtt ? "" : " [burn]";
+  const flags = [s.isForced ? "forced" : "", s.isHearingImpaired ? "SDH" : "", s.isDefault ? "default" : ""].filter(Boolean);
+  const details = flags.length ? ` [${flags.join(", ")}]` : "";
+  return `Track ${s.index} — ${lang} (${s.codec})${title}${details}${burn}`;
+}
+
+const selectedSubtitleLabel = computed(() => {
+  const selected = probeInfo.value?.subtitles.find((s) => s.index === subtitleChoice.value);
+  return selected ? subtitleLabel(selected) : "Subtitles";
+});
+
+function onSubtitleLoaded(event: Event) {
+  // eslint-disable-next-line no-undef -- DOM type supplied by TypeScript
+  const element = event.target as HTMLTrackElement | null;
+  if (element) element.track.mode = "showing";
+}
+
+function onLoadedMetadata() {
+  endLoading();
+  // Padded streams already begin at the content (the server input-seeked the
+  // pipeline and hls.js starts at streamContentStart); only seek the browser
+  // when the timeline covers the whole file from zero — subtitle burn-in,
+  // placeholder failure, an older backend — or when the native HLS path
+  // (Safari) plays a padded playlist, since hls.js's startPosition doesn't
+  // apply there.
+  const target = resumeTime > 0
+    ? resumeTime
+    : streamContentStart > 0 && !hls ? streamContentStart : 0;
+  if (target > 0 && videoRef.value) {
+    try {
+      videoRef.value.currentTime = target;
+    } catch {
+      /* ignore */
+    }
+  }
+  resumeTime = 0;
+}
+
+function onError() {
+  endLoading();
+  endBuffering();
+  error.value = "Failed to load video. The file may be corrupted or an unsupported format.";
+}
+
+function stopPlayback() {
+  saveProgress();
+  endLoading();
+  endBuffering();
+  if (seekTimer) {
+    clearTimeout(seekTimer);
+    seekTimer = null;
+  }
+  pendingSeekTarget = null;
+  // A deferred restart must never fire after teardown.
+  if (restartCooldownTimer) {
+    clearTimeout(restartCooldownTimer);
+    restartCooldownTimer = null;
+  }
+  deferredRestartTarget = null;
+  lastRestartTarget = -1;
+  lastRestartTime = 0;
+  void stopCurrentSession();
+  stopSaveTimer();
+  teardownHls();
+  currentVideoName.value = "";
+  probeInfo.value = null;
+  error.value = null;
+}
+
+function exitPlayer() {
+  mode.value = "browse";
+  stopPlayback();
+  router.push("/video");
+}
+
+async function loadProbe() {
+  // Bind progress/watched persistence and any still-running save timer to the
+  // video we are about to play before anything can await, so a navigation
+  // between two videos can't write the old video's state under the new key.
+  currentPath.value = encodedPath.value;
+  stopSaveTimer();
+  // A different video: the restart cooldown, any deferred seek and the
+  // same-target guard all belong to the previous timeline and must not act on
+  // this one (stopPlayback only runs on the route back to the library).
+  if (restartCooldownTimer) {
+    clearTimeout(restartCooldownTimer);
+    restartCooldownTimer = null;
+  }
+  deferredRestartTarget = null;
+  lastRestartTarget = -1;
+  lastRestartTime = 0;
+  beginLoading("Probing media…");
+  error.value = null;
+  // Restore saved position (if any)
+  resumeTime = loadProgress();
+  try {
+    const info = await apiGet<ProbeResponse>(`stream/probe/${encodedPath.value}`);
+    probeInfo.value = info;
+    const defaultAudio = info.audio.find((a) => a.isDefault) ?? info.audio[0];
+    audioChoice.value = defaultAudio?.index ?? -1;
+    const defaultSub = info.subtitles.find((s) => s.isDefault);
+    subtitleChoice.value = defaultSub?.index ?? -1;
+    await startStream();
+  } catch (e: any) {
+    endLoading();
+    error.value = e?.message ? `Probe failed: ${e.message}` : "Probe failed.";
+  }
+}
+
+async function startStream() {
+  starting.value = true;
+  // Burned-in subtitles need the whole video transcoded, so say so instead of
+  // leaving a bare spinner while the first segment is produced.
+  const burnInSelected =
+    probeInfo.value?.subtitles.find((s) => s.index === subtitleChoice.value)?.canDeliverAsVtt === false;
+  beginLoading(
+    burnInSelected
+      ? "Burning in subtitles — transcoding the video before playback…"
+      : "Starting stream…",
+  );
+  error.value = null;
+
+  await stopCurrentSession();
+  teardownHls();
+
+  try {
+    const resp = await apiPost<StartStreamResponse>("stream/start", {
+      encodedPath: encodedPath.value,
+      audioStreamIndex: audioChoice.value >= 0 ? audioChoice.value : null,
+      subtitleStreamIndex: subtitleChoice.value >= 0 ? subtitleChoice.value : null,
+      // Resume by input-seeking the ffmpeg pipeline straight to the saved
+      // position, so playback begins there immediately. Seeking the browser
+      // into a freshly started stream instead means waiting for ffmpeg to
+      // produce the segment at that position while hls.js backs off on 404s.
+      // The server reports the offset it applied; when it can't seek
+      // (subtitle burn-in) the timeline covers the whole file and
+      // onLoadedMetadata falls back to the browser-side seek.
+      startTimeSeconds: resumeTime > 0 ? Math.floor(resumeTime) : null,
+    });
+    sessionId.value = resp.sessionId;
+    subtitleTrackUrl.value = resp.subtitleUrl;
+    streamContentStart = resp.startOffsetSeconds ?? 0;
+    streamBurnIn = resp.subtitleBurnIn;
+    // The server consumed the resume position (padded head, pipeline seeked
+    // there) when streamContentStart > 0; only fall back to a browser seek
+    // when the timeline starts at zero.
+    if (streamContentStart > 0) resumeTime = 0;
+    await attachHls(resp.playlistUrl, streamContentStart);
+    startHeartbeat();
+  } catch (e: any) {
+    endLoading();
+    endBuffering();
+    error.value = e?.message ? `Stream start failed: ${e.message}` : "Stream start failed.";
+  } finally {
+    starting.value = false;
+    if (pendingSeekTarget !== null) {
+      // A settled seek arrived mid-restart: resolve it against the new stream.
+      const target = pendingSeekTarget;
+      pendingSeekTarget = null;
+      void resolveSeek(target);
+    }
+  }
+}
+
+async function onTrackChange() {
+  if (!probeInfo.value) return;
+  if (videoRef.value) {
+    // The browser timeline is the absolute source timeline.
+    resumeTime = videoRef.value.currentTime;
+  }
+  await startStream();
+}
+
+// Seeking fires per scrub step, so settle before resolving the final target.
+function onVideoSeeking() {
+  const v = videoRef.value;
+  if (!v) return;
+  const target = v.currentTime;
+  if (seekTimer) clearTimeout(seekTimer);
+  seekTimer = setTimeout(() => {
+    seekTimer = null;
+    if (buffering.value) {
+      // Re-targeted a visible catch-up: track the new position.
+      bufferTarget.value = target;
+    } else if (v.paused) {
+      // `waiting` does not fire reliably while paused (Safari), so a paused
+      // scrub into unproduced media needs the check armed explicitly.
+      scheduleBufferCheck();
+    }
+    void resolveSeek(target);
+  }, 500);
+}
+
+// Media is produced strictly in order from the stream head, so two kinds of
+// seek need a session restart instead of a plain browser seek:
+//   - into the padded placeholder head (black video + silence, not media);
+//   - past the transcode head, where the segment does not exist yet and
+//     hls.js would poll 404s until ffmpeg catches up — potentially minutes.
+// Everything the pipeline has already produced loads directly; restarting
+// input-seeks the pipeline to the target and completes in seconds.
+async function resolveSeek(target: number) {
+  // A settled seek supersedes any deferred restart from an earlier cooldown:
+  // without this, a stale target could survive a no-restart resolution and
+  // later yank playback backwards to it.
+  deferredRestartTarget = null;
+  if (starting.value) {
+    pendingSeekTarget = target; // a restart is in flight: settle again after it
+    return;
+  }
+  if (streamContentStart > 0 && target < streamContentStart) {
+    restartAt(target);
+    return;
+  }
+  // Burn-in sessions decode from zero and cannot input-seek, so a restart
+  // would not help; wait for the pipeline to reach the target instead.
+  if (streamBurnIn) return;
+  const id = sessionId.value;
+  if (!id) return;
+  try {
+    const res = await apiGet<{ headSeconds: number }>(`stream/${id}/head`);
+    const head = typeof res.headSeconds === "number" ? res.headSeconds : null;
+    // A segment or two of slack is cheaper to wait out than a restart. Re-check
+    // state after the await: a track change or restart may have superseded it.
+    if (head === null || starting.value || sessionId.value !== id) return;
+    if (target > head + 8) restartAt(target);
+  } catch {
+    return; // no head information: keep the previous stall-and-retry behaviour
+  }
+}
+
+function restartAt(target: number) {
+  const floored = Math.floor(target);
+  const now = Date.now();
+  if (floored === lastRestartTarget && now - lastRestartTime < 10_000) return;
+  if (now - lastRestartTime < 15_000) {
+    deferredRestartTarget = floored;
+    if (restartCooldownTimer === null) {
+      restartCooldownTimer = setTimeout(() => {
+        restartCooldownTimer = null;
+        const deferred = deferredRestartTarget;
+        deferredRestartTarget = null;
+        if (deferred !== null) void resolveSeek(deferred);
+      }, 15_000 - (now - lastRestartTime));
+    }
+    return;
+  }
+  if (restartCooldownTimer !== null) {
+    clearTimeout(restartCooldownTimer);
+    restartCooldownTimer = null;
+  }
+  deferredRestartTarget = null;
+  lastRestartTarget = floored;
+  lastRestartTime = now;
+  pendingSeekTarget = null;
+  resumeTime = floored;
+  void startStream();
+}
+
+function attachHls(playlistUrl: string, startAt = 0): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const video = videoRef.value;
+    if (!video) {
+      reject(new Error("No video element"));
+      return;
+    }
+
+    if (Hls.isSupported()) {
+      hls = new Hls({
+        xhrSetup: (xhr) => {
+          xhr.withCredentials = true;
+        },
+        enableWorker: true,
+        lowLatencyMode: false,
+        // Start straight at the content: with a padded playlist the head is
+        // placeholder media, and starting at 0 would play black first.
+        startPosition: startAt,
+        fragLoadingMaxRetry: 200,
+        fragLoadingRetryDelay: 500,
+        // Cap the retry backoff well below hls.js's 64s default. Segments
+        // ahead of ffmpeg's head don't exist yet, and a long backoff leaves
+        // a seek into them stalled for up to a minute after they appear.
+        fragLoadingMaxRetryTimeout: 2000,
+        manifestLoadingMaxRetry: 10,
+        levelLoadingMaxRetry: 10,
+      });
+      hls.loadSource(playlistUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        endLoading();
+        startSaveTimer();
+        video.play().catch(() => {
+          /* autoplay may be blocked */
+        });
+        resolve();
+      });
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (!data.fatal) return;
+        if (
+          data.type === Hls.ErrorTypes.NETWORK_ERROR &&
+          data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR
+        ) {
+          hls?.startLoad();
+        } else {
+          reject(new Error(`HLS error: ${data.type} / ${data.details}`));
+        }
+      });
+      return;
+    }
+
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = playlistUrl;
+      video.addEventListener(
+        "loadedmetadata",
+        () => {
+          startSaveTimer();
+          resolve();
+        },
+        { once: true },
+      );
+      video.addEventListener("error", () => reject(new Error("Native HLS error")), { once: true });
+      return;
+    }
+
+    reject(new Error("HLS not supported in this browser"));
+  });
+}
+
+function teardownHls() {
+  if (hls) {
+    hls.destroy();
+    hls = null;
+  }
+  if (videoRef.value) {
+    videoRef.value.removeAttribute("src");
+    videoRef.value.load();
+  }
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(async () => {
+    const id = sessionId.value;
+    if (!id) return;
+    try {
+      await apiPost(`stream/${id}/heartbeat`);
+    } catch {
+      /* ignore */
+    }
+  }, 60_000);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+async function stopCurrentSession() {
+  const id = sessionId.value;
+  if (!id) return;
+  sessionId.value = null;
+  stopHeartbeat();
+  try {
+    await apiPost(`stream/${id}/stop`);
+  } catch {
+    /* best effort */
+  }
+}
+
+// --- Route handling ---
+function decodeSegment(seg: string): string {
+  try {
+    const padded = seg.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = padded.length % 4 ? "=".repeat(4 - (padded.length % 4)) : "";
+    const bin = atob(padded + pad);
+    try {
+      return decodeURIComponent(escape(bin));
+    } catch {
+      return bin;
+    }
+  } catch {
+    return seg;
+  }
+}
+
+function isVideoFileName(name: string): boolean {
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  return ["mp4", "webm", "mov", "mkv", "avi", "m4v", "ogv", "ts", "wmv", "flv"].includes(ext);
+}
+
+function syncModeFromRoute() {
+  if (!encodedPath.value) {
+    mode.value = "browse";
+    return;
+  }
+  const segments = encodedPath.value.split("/");
+  const last = decodeSegment(segments[segments.length - 1]);
+  if (isVideoFileName(last)) {
+    mode.value = "play";
+    currentVideoName.value = last;
+  } else {
+    mode.value = "browse";
+  }
+}
+
+// --- Keyboard shortcuts in play mode ---
+// Intercept at the video element itself (capture phase) so we win over
+// the browser's native handler which runs in the default phase.
+function attachKeyHandler() {
+  const v = videoRef.value;
+  if (v) {
+    v.addEventListener("keydown", onPlayerKeydown, { capture: true });
+  }
+}
+function detachKeyHandler() {
+  const v = videoRef.value;
+  if (v) {
+    v.removeEventListener("keydown", onPlayerKeydown, { capture: true });
+  }
+}
+
+function onPlayerKeydown(e: KeyboardEvent) {
+  if (mode.value !== "play" || !videoRef.value) return;
+  if (e.key === "ArrowRight") {
+    e.preventDefault();
+    e.stopPropagation();
+    videoRef.value.currentTime += 5;
+  } else if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    e.stopPropagation();
+    videoRef.value.currentTime -= 5;
+  }
+}
+
+watch(
+  () => route.fullPath,
+  async () => {
+    if (!route.path.startsWith("/video")) return;
+    const wasPlaying = mode.value === "play";
+    syncModeFromRoute();
+    if (mode.value === "browse") {
+      // Leaving the player via browser back skips exitPlayer, so save the
+      // position / watched flag and stop the session here.
+      if (wasPlaying) stopPlayback();
+      await loadLibrary();
+    } else {
+      await loadProbe();
+    }
+  },
+);
+
+// Attach key handler to video element when entering play mode
+watch(mode, () => {
+  if (mode.value === "play") {
+    nextTick(() => {
+      attachKeyHandler();
+    });
+  } else {
+    detachKeyHandler();
+  }
+});
+
+onMounted(() => {
+  window.addEventListener("pagehide", saveProgress);
+  syncModeFromRoute();
+  if (mode.value === "browse") {
+    loadLibrary();
+  } else {
+    loadProbe();
+  }
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("pagehide", saveProgress);
+  detachKeyHandler();
+  stopHeartbeat();
+  stopPlayback();
+});
+</script>
+
+<style scoped>
+.video-page {
+  height: 100%;
+}
+
+/* ===== Library mode ===== */
+.library-mode {
+  padding: 1.5rem 2rem;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.section {
+  margin-bottom: 2.5rem;
+}
+
+.poster-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 1.25rem;
+}
+
+.poster-card {
+  cursor: pointer;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #1a1a1a;
+  transition:
+    transform 0.15s,
+    box-shadow 0.15s;
+  display: flex;
+  flex-direction: column;
+}
+
+.series-group { margin-bottom: 1.5rem; }
+.series-group h3 { margin: 0 0 0.75rem; }
+.series-group h3 span { color: var(--text-muted); font-weight: normal; }
+.season-card { border: 0; padding: 0; color: inherit; text-align: left; }
+
+.poster-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+}
+
+.poster-card:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.poster-card.no-poster {
+  min-height: 240px;
+  background: linear-gradient(135deg, #4a5568 0%, #2d3748 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  text-align: center;
+}
+
+.poster-card.no-poster .poster-title {
+  color: #fff;
+  font-size: 0.9rem;
+  font-weight: 600;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.3;
+}
+
+.poster-card.no-poster .poster-year,
+.poster-card.no-poster .poster-sub {
+  color: rgba(255, 255, 255, 0.7);
+  margin-top: 0.25rem;
+}
+
+.poster-img {
+  width: 100%;
+  aspect-ratio: 2/3;
+  object-fit: cover;
+  display: block;
+}
+
+.poster-info {
+  padding: 0.5rem 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.poster-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+
+.poster-year,
+.poster-sub {
+  font-size: 0.75rem;
+  color: #888;
+}
+
+/* ===== Episode overlay ===== */
+.episode-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 2rem;
+}
+
+.episode-dialog {
+  background: #1d1d1d;
+  border-radius: 12px;
+  max-width: 600px;
+  width: 100%;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.episode-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.episode-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+
+.close-btn:hover {
+  background: #2a2a2a;
+}
+
+.episode-list {
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+
+.episode-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  gap: 0.75rem;
+}
+
+.episode-item:hover {
+  background: #2a2a2a;
+}
+
+.episode-badge {
+  flex-shrink: 0;
+  min-width: 2.6rem;
+  text-align: center;
+  padding: 0.15rem 0.3rem;
+  border-radius: 4px;
+  background: #333;
+  color: #bbb;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.episode-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.episode-name {
+  font-size: 0.85rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.episode-file {
+  font-size: 0.7rem;
+  color: #777;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.episode-size {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: #999;
+  white-space: nowrap;
+}
+
+.episode-watched {
+  flex-shrink: 0;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(74, 222, 128, 0.12);
+  color: #4ade80;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* ===== Player mode ===== */
+.player-mode {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #000;
+  color: #fff;
+}
+
+.player-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  background: #111;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.back-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: none;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: #fff;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.back-btn:hover {
+  background: #1f1f1f;
+}
+
+.player-header h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+.track-bar {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.75rem 1.5rem;
+  background: #181818;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.track-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.track-label {
+  color: #999;
+}
+
+.track-field select {
+  background: #1f1f1f;
+  color: #fff;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.track-field select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.video-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.video {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+.loading-overlay,
+.error-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  background: rgba(0, 0, 0, 0.9);
+  color: #fff;
+  font-size: 1.1rem;
+}
+
+.spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid #333;
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.buffer-overlay {
+  /* Designed to persist for a while: native controls (pause, seek back into
+     produced media) must stay reachable underneath it. */
+  pointer-events: none;
+}
+
+.overlay-detail {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #cbd5e1;
+}
+
+.overlay-progress {
+  width: min(320px, 70%);
+  height: 6px;
+  border-radius: 3px;
+  background: #333;
+  overflow: hidden;
+}
+
+.overlay-progress-fill {
+  height: 100%;
+  background: #2563eb;
+  transition: width 0.5s ease;
+}
+
+.error-overlay .material-symbols-outlined {
+  font-size: 3rem;
+  color: #ef4444;
+}
+</style>

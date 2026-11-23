@@ -1,0 +1,26 @@
+{
+  "name": "home-theatre",
+  "productName": "Home Theatre",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "desktop/main.mjs",
+  "scripts": {
+    "setup:electron": "install-electron",
+    "build": "vue-tsc --noEmit && vite build && dotnet build backend/HomeTheatre.Backend.csproj -c Release",
+    "start": "npm run build && electron ."
+  },
+  "dependencies": {
+    "material-symbols": "0.49.0",
+    "vue": "3.5.45",
+    "hls.js": "1.6.16",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.7",
+    "electron": "45.4.1",
+    "typescript": "5.7.3",
+    "vite": "8.3.8",
+    "vue-tsc": "3.2.0"
+  }
+}

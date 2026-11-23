@@ -1,0 +1,12 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+  color: #eee;
+  background: #141414;
+  --border: #363636;
+  --text: #eee;
+  --text-muted: #aaa;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+button, select { font: inherit; }
