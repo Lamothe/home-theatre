@@ -196,6 +196,9 @@
                 />
                 <span class="poster-info">
                   <span class="poster-title">Season {{ season.seasonNumber }}</span>
+                  <span v-if="season.episodePaths.length" class="poster-sub">
+                    {{ seasonWatchStatus(season) }}
+                  </span>
                 </span>
               </button>
             </div>
@@ -236,24 +239,28 @@
             v-else
             class="episode-list"
           >
-            <button
-              v-for="ep in episodes"
-              :key="ep.encodedPath"
-              class="episode-item"
-              :title="ep.fileName"
-              @click="playFromLibrary(ep.encodedPath)"
-            >
-              <span class="episode-badge">{{ episodeBadge(ep) }}</span>
-              <span class="episode-main">
-                <span class="episode-name">{{ episodeLabel(ep) }}</span>
-                <span class="episode-file">{{ ep.fileName }}</span>
-              </span>
-              <span
-                v-if="isWatched(ep.encodedPath)"
-                class="episode-watched"
-              >Watched</span>
-              <span class="episode-size">{{ formatSize(ep.size) }}</span>
-            </button>
+            <div v-for="ep in episodes" :key="ep.encodedPath" class="episode-row">
+              <button class="episode-item" :title="ep.fileName" @click="playFromLibrary(ep.encodedPath)">
+                <span class="episode-badge">{{ episodeBadge(ep) }}</span>
+                <span class="episode-main">
+                  <span class="episode-name">{{ episodeLabel(ep) }}</span>
+                  <span class="episode-file">{{ ep.fileName }}</span>
+                </span>
+                <span v-if="isWatched(ep.encodedPath)" class="episode-watched">Watched</span>
+                <span class="episode-size">{{ formatSize(ep.size) }}</span>
+              </button>
+              <button
+                type="button"
+                class="episode-toggle"
+                :aria-label="`Mark ${episodeLabel(ep)} as ${isWatched(ep.encodedPath) ? 'unwatched' : 'watched'}`"
+                :title="isWatched(ep.encodedPath) ? 'Mark as unwatched' : 'Mark as watched'"
+                @click="setWatched(ep.encodedPath, !isWatched(ep.encodedPath))"
+              >
+                <span class="material-symbols-outlined" aria-hidden="true">
+                  {{ isWatched(ep.encodedPath) ? 'check_circle' : 'radio_button_unchecked' }}
+                </span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -279,6 +286,7 @@ interface LibrarySeason {
   title: string;
   year: number | null;
   seasonNumber: number;
+  episodePaths: string[];
   encodedPath: string;
   posterUrl: string;
 }
@@ -555,15 +563,33 @@ const bufferPercent = computed(() => {
 function progressKey() {
   return `video-progress:${currentPath.value}`;
 }
-// Watched flags mirror the progress keys and are written when a video is
-// effectively finished (ended, or stopped beyond 98%). The episode dialog
-// reads them to badge what has already been seen.
+const watchedPrefix = "video-watched:";
+const watchedPaths = ref(new Set(Object.keys(localStorage)
+  .filter(key => key.startsWith(watchedPrefix) && localStorage.getItem(key) === "1")
+  .map(key => key.slice(watchedPrefix.length))));
+
 function isWatched(path: string): boolean {
-  return localStorage.getItem(`video-watched:${path}`) === "1";
+  return watchedPaths.value.has(path);
 }
-function markWatched() {
-  localStorage.setItem(`video-watched:${currentPath.value}`, "1");
+
+function setWatched(path: string, watched: boolean) {
+  if (!path) return;
+  if (watched) {
+    localStorage.setItem(watchedPrefix + path, "1");
+    localStorage.removeItem("video-progress:" + path);
+    watchedPaths.value.add(path);
+  } else {
+    localStorage.removeItem(watchedPrefix + path);
+    watchedPaths.value.delete(path);
+  }
 }
+
+function seasonWatchStatus(season: LibrarySeason): string {
+  const total = season.episodePaths.length;
+  const watched = season.episodePaths.filter(isWatched).length;
+  return watched === total ? "Watched" : `${watched} of ${total} watched`;
+}
+
 function saveProgress() {
   const v = videoRef.value;
   if (!v || v.currentTime < 1) return;
@@ -578,8 +604,7 @@ function saveProgress() {
     ? absolute / total
     : v.duration > 0 ? v.currentTime / v.duration : 0;
   if (fraction > 0.95) {
-    markWatched();
-    clearProgress();
+    setWatched(currentPath.value, true);
     return;
   }
   localStorage.setItem(progressKey(), String(absolute));
@@ -592,12 +617,8 @@ function loadProgress(): number {
   // timestamp differences between browser playback and HLS segments.
   return isNaN(t) ? 0 : Math.max(0, t - 30);
 }
-function clearProgress() {
-  localStorage.removeItem(progressKey());
-}
 function onVideoEnded() {
-  markWatched();
-  clearProgress();
+  setWatched(currentPath.value, true);
 }
 function onVideoPause() {
   if (!videoRef.value?.ended) saveProgress();
@@ -1356,7 +1377,21 @@ onBeforeUnmount(() => {
   padding: 0.5rem;
 }
 
+.episode-row { display: flex; }
+.episode-toggle {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 0.75rem;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.episode-toggle:hover { background: #2a2a2a; color: var(--text); }
+.episode-toggle .material-symbols-outlined { font-size: 1.15rem; }
+
 .episode-item {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   width: 100%;

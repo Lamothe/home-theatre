@@ -1,8 +1,11 @@
-const migrationKey = "atomic-video-history-imported";
-
 export async function importAtomicHistory(): Promise<void> {
+  await importHistory("/api/history/atomic", "atomic-video-history-imported");
+  await importHistory("/api/history/atomic-mercury", "atomic-mercury-video-history-imported");
+}
+
+async function importHistory(endpoint: string, migrationKey: string): Promise<void> {
   if (localStorage.getItem(migrationKey)) return;
-  const response = await fetch("/api/history/atomic");
+  const response = await fetch(endpoint);
   if (response.status === 204) return;
   if (!response.ok) throw new Error(`History request failed (${response.status})`);
 

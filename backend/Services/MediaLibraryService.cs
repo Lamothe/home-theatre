@@ -14,7 +14,7 @@ public interface IMediaLibraryService
 
 public record LibraryScanResult(List<LibraryMovie> Movies, List<LibrarySeason> Seasons);
 public record LibraryMovie(string Title, int? Year, string EncodedPath, string PlayPath, string? PosterUrl);
-public record LibrarySeason(string Title, int? Year, int SeasonNumber, string EncodedPath, string? PosterUrl);
+public record LibrarySeason(string Title, int? Year, int SeasonNumber, string EncodedPath, string? PosterUrl, string[] EpisodePaths);
 public record EpisodeInfo(
     int? Season,
     int? Episode,
@@ -125,10 +125,10 @@ public class MediaLibraryService(
 
             foreach (var (seasonNum, seasonPath, _) in seasons)
             {
-                var seasonFolderName = Path.GetFileName(seasonPath);
-                var seasonEncoded = EncodeRelativePath("Series", seriesName, seasonFolderName);
+                var seasonEncoded = EncodePathFromRoot(seasonPath);
                 var posterUrl = $"/api/stream/poster/{seasonEncoded}";
-                result.Add(new LibrarySeason(seriesTitle, seriesYear, seasonNum, seasonEncoded, posterUrl));
+                var episodePaths = GetEpisodes(seasonPath, seasonNum).Select(episode => episode.EncodedPath).ToArray();
+                result.Add(new LibrarySeason(seriesTitle, seriesYear, seasonNum, seasonEncoded, posterUrl, episodePaths));
             }
         }
 
@@ -200,11 +200,7 @@ public class MediaLibraryService(
         foreach (var file in files)
         {
             var fileName = Path.GetFileName(file);
-            // Compute path relative to VideoRoot so it includes Series/<name>/<season>/<file>
-            var relPath = Path.GetRelativePath(pathResolver.Root, fullPath);
-            var encodedPath = string.Join('/', relPath
-                .Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)
-                .Select(IPathResolver.EncodeSegment)) + "/" + IPathResolver.EncodeSegment(fileName);
+            var encodedPath = EncodePathFromRoot(file);
 
             long size = 0;
             try { size = new FileInfo(file).Length; } catch { }
@@ -294,6 +290,10 @@ public class MediaLibraryService(
         t = Regex.Replace(t, @"\s+", " ").Trim();
         return t;
     }
+
+    private string EncodePathFromRoot(string path) =>
+        EncodeRelativePath(Path.GetRelativePath(pathResolver.Root, path)
+            .Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries));
 
     private static string EncodeRelativePath(params string[] segments)
     {

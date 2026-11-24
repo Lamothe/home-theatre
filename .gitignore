@@ -4,3 +4,4 @@ backend/bin/
 backend/obj/
 settings.local.json
 history.local.json
+history.mercury.local.json

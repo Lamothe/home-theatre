@@ -103,7 +103,11 @@ async function launch() {
     height: 900,
     minWidth: 640,
     minHeight: 480,
-    backgroundColor: "#141414",
+    backgroundColor: '#141414',
+    ...(process.platform === 'linux' ? {
+      titleBarStyle: 'hidden',
+      titleBarOverlay: { color: '#141414', symbolColor: '#eeeeee', height: 32 },
+    } : {}),
     autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
   });

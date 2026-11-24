@@ -44,11 +44,14 @@ app.Use(async (context, next) =>
 app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = renderer });
 app.UseStaticFiles(new StaticFileOptions { FileProvider = renderer });
 app.MapControllers();
-app.MapGet("/api/history/atomic", () =>
+app.MapGet("/api/history/atomic", () => ReadHistory("history.local.json"));
+app.MapGet("/api/history/atomic-mercury", () => ReadHistory("history.mercury.local.json"));
+
+IResult ReadHistory(string filename)
 {
-    var path = Path.Combine(app.Environment.ContentRootPath, "history.local.json");
+    var path = Path.Combine(app.Environment.ContentRootPath, filename);
     return File.Exists(path) ? Results.File(path, "application/json") : Results.NoContent();
-});
+}
 
 var store = app.Services.GetRequiredService<IStreamSessionStore>();
 app.Lifetime.ApplicationStopping.Register(() =>

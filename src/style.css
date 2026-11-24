@@ -10,3 +10,18 @@
 *, *::before, *::after { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }
 button, select { font: inherit; }
+
+
+body {
+  padding-top: env(titlebar-area-height, 0px);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: env(titlebar-area-x, 0px);
+  width: env(titlebar-area-width, 0px);
+  height: env(titlebar-area-height, 0px);
+  app-region: drag;
+}
