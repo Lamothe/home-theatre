@@ -8,6 +8,7 @@ import { join } from "node:path";
 const scheme = "home-theatre";
 const origin = `${scheme}://app`;
 const root = fileURLToPath(new URL("../", import.meta.url));
+const chromeBackground = "#101620";
 let backend;
 let window;
 let quitting = false;
@@ -103,10 +104,10 @@ async function launch() {
     height: 900,
     minWidth: 640,
     minHeight: 480,
-    backgroundColor: '#141414',
+    backgroundColor: chromeBackground,
     ...(process.platform === 'linux' ? {
       titleBarStyle: 'hidden',
-      titleBarOverlay: { color: '#141414', symbolColor: '#eeeeee', height: 32 },
+      titleBarOverlay: { color: chromeBackground, symbolColor: '#eef4fc', height: 32 },
     } : {}),
     autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },

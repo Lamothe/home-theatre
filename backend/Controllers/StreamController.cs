@@ -36,12 +36,12 @@ public class StreamController(
     }
 
     [HttpGet("poster/{**encodedPath}")]
-    public async Task<IActionResult> Poster(string? encodedPath, CancellationToken cancellationToken)
+    public async Task<IActionResult> Poster(string? encodedPath, CancellationToken cancellationToken, [FromQuery] bool seriesPoster = false)
     {
         if (!pathResolver.TryResolve(encodedPath, out var full, out _))
             return NotFound();
 
-        var (title, year, isSeries, season) = ClassifyPath(full);
+        var (title, year, isSeries, season) = ClassifyPath(full, seriesPoster);
 
         if (string.IsNullOrEmpty(title))
             return NotFound();
@@ -99,7 +99,7 @@ public class StreamController(
         }
     }
 
-    private (string Title, int? Year, bool IsSeries, int? Season) ClassifyPath(string fullPath)
+    private (string Title, int? Year, bool IsSeries, int? Season) ClassifyPath(string fullPath, bool seriesPoster)
     {
         var root = pathResolver.Root;
 
@@ -126,7 +126,7 @@ public class StreamController(
                         season = DetectSeasonFromFiles(fullPath);
                     }
                 }
-                else
+                else if (!seriesPoster)
                 {
                     season = DetectSeasonFromFiles(fullPath);
                 }

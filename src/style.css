@@ -1,11 +1,17 @@
 :root {
   color-scheme: dark;
   font-family: system-ui, sans-serif;
-  color: #eee;
-  background: #141414;
-  --border: #363636;
-  --text: #eee;
-  --text-muted: #aaa;
+  --text: #eef4fc;
+  --theatre-base: #101620;
+  --theatre-panel: #182231;
+  --theatre-raised: #202e42;
+  --theatre-hover: #263a56;
+  --theatre-border: #2e3d52;
+  --theatre-border-strong: #42638a;
+  --theatre-muted: #a9bad0;
+  --theatre-accent: #83baff;
+  color: var(--text);
+  background: var(--theatre-base);
 }
 *, *::before, *::after { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }

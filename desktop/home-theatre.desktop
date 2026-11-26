@@ -2,7 +2,7 @@
 Type=Application
 Name=Home Theatre
 Comment=Browse and watch your movies and TV series
-Exec="/home/michael/Projects/Home Theatre/node_modules/electron/dist/electron" --ozone-platform=wayland --class=home-theatre "/home/michael/Projects/Home Theatre"
+Exec=env GIO_USE_VFS=local "/home/michael/Projects/Home Theatre/node_modules/electron/dist/electron" --ozone-platform=wayland --class=home-theatre "/home/michael/Projects/Home Theatre"
 Icon=/home/michael/Projects/Home Theatre/desktop/home-theatre.png
 Terminal=false
 StartupWMClass=home-theatre
