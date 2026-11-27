@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 using HomeTheatre.Models;
 using Microsoft.Extensions.Options;
@@ -95,16 +96,22 @@ public class ProbeService(IOptions<VideoOptions> options, ILogger<ProbeService> 
             }
         }
 
-        var duration = 0.0;
-        if (doc.RootElement.TryGetProperty("format", out var fmt) &&
-            fmt.TryGetProperty("duration", out var durEl) &&
-            double.TryParse(durEl.GetString(), out var parsedDuration))
-        {
-            duration = parsedDuration;
-        }
-
+        doc.RootElement.TryGetProperty("format", out var format);
         var container = Path.GetExtension(fullPath).TrimStart('.').ToLowerInvariant();
 
-        return new ProbeResponse(container, duration, video, audio, subs);
+        return new ProbeResponse(container, ReadFormatSeconds(format, "duration"), video, audio, subs)
+        {
+            StartTimeSeconds = ReadFormatSeconds(format, "start_time"),
+        };
+    }
+
+    private static double ReadFormatSeconds(JsonElement format, string property)
+    {
+        return format.ValueKind == JsonValueKind.Object &&
+            format.TryGetProperty(property, out var value) &&
+            double.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) &&
+            double.IsFinite(seconds)
+            ? seconds
+            : 0;
     }
 }

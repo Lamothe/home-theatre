@@ -5,7 +5,10 @@ public record ProbeResponse(
     double DurationSeconds,
     List<ProbeVideoStream> Video,
     List<ProbeAudioStream> Audio,
-    List<ProbeSubtitleStream> Subtitles);
+    List<ProbeSubtitleStream> Subtitles)
+{
+    internal double StartTimeSeconds { get; init; }
+}
 
 public record ProbeVideoStream(int Index, string Codec, int? Width, int? Height, string? ColorRange);
 

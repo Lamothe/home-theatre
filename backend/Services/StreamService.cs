@@ -123,48 +123,36 @@ public class StreamService(
         // resume point. Sessions burning subtitles must decode from zero so
         // the burn-in filter graph (subtitles filter / sub2video overlay) sees
         // source-aligned timestamps.
-        // Stream-copy pipelines cannot retime source keyframes: where the HLS
-        // muxer cuts follows the source keyframe layout, so scan it once up
-        // front — both to anchor mid-file starts on the real -ss landing point
-        // and to plan the playlist tail around the cuts (PlanCopySegmentDurations).
-        var copyLayout = (directPlay || audioOnlyTranscode)
+        // Stream-copy pipelines start at the first keyframe FFmpeg actually
+        // emits after input seek. FFmpeg can seek earlier than the requested
+        // timestamp, so use that packet both for the placeholder head and for
+        // planning the HLS cuts. Keep the requested input seek for the muxer.
+        var copyVideo = directPlay || audioOnlyTranscode;
+        var copyLayout = copyVideo
             ? await ScanVideoKeyFramesAsync(fullPath, cancellationToken)
             : null;
 
         double? seekStart = needsBurnIn || startTimeSeconds is not > 0
             ? null
             : Math.Min(Math.Floor(startTimeSeconds.Value), Math.Max(0, info.DurationSeconds - 1));
+        double? copyStartPts = null;
         List<(string Name, double Duration)>? placeholderHead = null;
         if (seekStart is > 0)
         {
-            // Stream-copy pipelines start at the last keyframe at or before the
-            // target, so the placeholder head must cover exactly that anchor or
-            // the picture plays ahead of the absolute timeline (and the subtitle
-            // sidecar with it). Transcode pipelines are frame-accurate —
-            // accurate_seek discards decode output up to the target — so they
-            // anchor at the target itself instead of snapping playback back to
-            // the previous keyframe.
-            if (copyLayout is not null)
+            if (copyVideo)
+                copyStartPts = await ProbeCopyStartPtsAsync(fullPath, videoStream, seekStart.Value, cancellationToken);
+
+            var anchor = copyVideo ? copyStartPts - info.StartTimeSeconds : seekStart;
+            if (anchor is > 0.05)
             {
-                double? anchor = null;
-                foreach (var pts in copyLayout.KeyFrames)
-                {
-                    if (pts <= seekStart.Value && (anchor is null || pts > anchor)) anchor = pts;
-                }
-                if (anchor is not null) seekStart = anchor.Value;
+                placeholderHead = await BuildPlaceholderHeadAsync(
+                    tempDir, videoStream.Width, videoStream.Height, audioStream != null, anchor.Value, cancellationToken);
             }
-            else if (directPlay || audioOnlyTranscode)
-            {
-                seekStart = await FindSeekAnchorAsync(fullPath, seekStart.Value, cancellationToken);
-            }
-            placeholderHead = await BuildPlaceholderHeadAsync(
-                tempDir, videoStream.Width, videoStream.Height, audioStream != null, seekStart.Value, cancellationToken);
             if (placeholderHead is null)
             {
-                // Without a padded head the player cannot show an absolute
-                // timeline; run the pipeline from zero and let the client
-                // seek the browser once metadata is available instead.
+                // Use the full timeline and let the player seek after loading.
                 seekStart = null;
+                copyStartPts = null;
             }
         }
 
@@ -245,13 +233,13 @@ public class StreamService(
         // growing playlist (enc.m3u8) is ignored for playback but tracked for
         // GetTimelineHeadSeconds. Stream-copy pipelines cannot retime source
         // keyframes, so their tail durations follow the source GOP layout
-        // (PlanCopySegmentDurationsAsync); transcode pipelines are keyframe-
+        // (PlanCopySegmentDurations); transcode pipelines are keyframe-
         // locked to the uniform SegmentSeconds grid. When the pipeline was
         // input-seeked to a resume point, placeholderHead pads the head of the
         // timeline up to the seek anchor and the real media follows an
         // EXT-X-DISCONTINUITY — an absolute source timeline with instant start.
         var plannedTail = copyLayout is not null
-            ? PlanCopySegmentDurations(copyLayout, seekStart ?? 0)
+            ? PlanCopySegmentDurations(copyLayout, copyStartPts ?? copyLayout.KeyFrames[0])
             : null;
         var layout = WriteStaticPlaylist(tempDir, info.DurationSeconds, placeholderHead, plannedTail);
         session.TimelineContentStart = layout.ContentStart;
@@ -600,81 +588,44 @@ public class StreamService(
         return file;
     }
 
-    /// <summary>
-    /// Finds the last video keyframe at or before the seek target. Input
-    /// seeking with stream copy anchors every stream at that keyframe, so it
-    /// must be the reference point for every seek (pipeline and subtitle
-    /// sidecar alike). Falls back to the raw target when the probe fails or
-    /// no keyframe is found even in the widened window.
-    /// </summary>
-    private const double SeekAnchorProbeWindowSeconds = 30;
-
-    /// <summary>
-    /// Second-pass window for sparse-GOP sources (long-GOP x265 releases can
-    /// go minutes between keyframes). Only paid when the fast window finds
-    /// nothing; packet scanning is demux-only and cheap on that scale.
-    /// </summary>
-    private const double SeekAnchorProbeFallbackWindowSeconds = 300;
-
-    private async Task<double> FindSeekAnchorAsync(string input, double target, CancellationToken ct)
+    private async Task<double?> ProbeCopyStartPtsAsync(
+        string input, ProbeVideoStream video, double seekStart, CancellationToken ct)
     {
-        var anchor = await ProbeSeekAnchorAsync(input, target, SeekAnchorProbeWindowSeconds, ct);
-        if (anchor is null)
-        {
-            anchor = await ProbeSeekAnchorAsync(input, target, SeekAnchorProbeFallbackWindowSeconds, ct);
-        }
-        return anchor ?? target;
-    }
+        // framecrc exposes the original PTS and time base of one copied
+        // packet. Keep the input options identical to the streaming command.
+        var args = new List<string> { "-v", "error", "-copyts" };
+        AppendCopyInputArgs(args, input, seekStart);
+        args.AddRange(["-map", $"0:{video.Index}", "-c:v", "copy", "-frames:v", "1", "-f", "framecrc", "-"]);
 
-    private async Task<double?> ProbeSeekAnchorAsync(string input, double target, double windowSeconds, CancellationToken ct)
-    {
         try
         {
-            var from = Math.Max(0, target - windowSeconds);
-            var args = new List<string>
-            {
-                "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "packet=pts_time,flags",
-                "-of", "csv=p=0",
-                "-read_intervals", $"{from.ToString(CultureInfo.InvariantCulture)}%{target.ToString(CultureInfo.InvariantCulture)}",
-                input,
-            };
-            var psi = NewProcessStartInfo(options.Value.FfprobePath, args);
-            using var proc = Process.Start(psi);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(5));
+            using var proc = Process.Start(NewProcessStartInfo(options.Value.FfmpegPath, args));
             if (proc is null) return null;
-            ct.Register(() => TryKill(proc));
-            var stdout = await proc.StandardOutput.ReadToEndAsync(ct);
-            await proc.WaitForExitAsync(ct);
+            using var killOnCancel = timeout.Token.Register(() => TryKill(proc));
+            var stdout = proc.StandardOutput.ReadToEndAsync(timeout.Token);
+            var stderr = proc.StandardError.ReadToEndAsync(timeout.Token);
+            await Task.WhenAll(stdout, stderr, proc.WaitForExitAsync(timeout.Token));
             if (proc.ExitCode != 0) return null;
 
-            double? anchor = null;
-            foreach (var pts in ParseKeyFramePts(stdout))
+            var lines = (await stdout).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var timeBase = Array.Find(lines, line => line.StartsWith("#tb 0: ", StringComparison.Ordinal))?[7..].Split('/');
+            var packet = Array.Find(lines, line => line.StartsWith("0,", StringComparison.Ordinal))?.Split(',');
+            if (timeBase is [var numerator, var denominator] && packet is { Length: >= 3 } &&
+                int.TryParse(numerator, NumberStyles.Integer, CultureInfo.InvariantCulture, out var num) &&
+                int.TryParse(denominator, NumberStyles.Integer, CultureInfo.InvariantCulture, out var den) && den > 0 &&
+                long.TryParse(packet[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var pts))
             {
-                if (pts <= target && (anchor is null || pts > anchor)) anchor = pts;
+                return pts * (double)num / den;
             }
-
-            return anchor;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning(ex, "Keyframe anchor probe failed for {input} ({window}s window)", input, windowSeconds);
-            return null;
+            logger.LogWarning(ex, "Could not determine stream copy start for {input}", input);
         }
-    }
 
-    /// <summary>Video keyframe PTS values from ffprobe packet CSV output ("12.000000,K__").</summary>
-    private static List<double> ParseKeyFramePts(string packetCsv)
-    {
-        var keyframes = new List<double>();
-        foreach (var line in packetCsv.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var parts = line.Split(',');
-            if (parts.Length < 2 || !parts[1].Contains('K')) continue;
-            if (!double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var pts)) continue;
-            keyframes.Add(pts);
-        }
-        return keyframes;
+        return null;
     }
 
     private async Task<CopySourceLayout?> ScanVideoKeyFramesAsync(string input, CancellationToken ct)
@@ -741,15 +692,8 @@ public class StreamService(
     /// can sit up to one audio frame below the first keyframe when audio is
     /// muxed first, which only matters when a keyframe falls inside that band.
     /// </summary>
-    private static List<double>? PlanCopySegmentDurations(CopySourceLayout layout, double start)
+    private static List<double>? PlanCopySegmentDurations(CopySourceLayout layout, double gridStart)
     {
-        double? origin = null;
-        foreach (var pts in layout.KeyFrames)
-        {
-            if (pts >= start) { origin = pts; break; }
-        }
-        var gridStart = origin ?? start;
-
         var durations = new List<double>();
         var cut = gridStart;
         var index = 0;
@@ -901,6 +845,16 @@ public class StreamService(
         }
     }
 
+    private static void AppendCopyInputArgs(List<string> args, string input, double? startTime)
+    {
+        if (startTime is > 0)
+        {
+            args.Add("-ss");
+            args.Add(startTime.Value.ToString(CultureInfo.InvariantCulture));
+        }
+        args.AddRange(["-fflags", "+genpts", "-i", input]);
+    }
+
     private Process StartRemux(
         string input,
         ProbeVideoStream video,
@@ -914,16 +868,7 @@ public class StreamService(
         var segPattern = Path.Combine(tempDir, "%d.ts");
 
         var args = new List<string>();
-        // Input seek before -i. Stream copy lands at the keyframe at or before
-        // the value, so nudge 10ms past the anchor: the printed keyframe PTS is
-        // rounded, and an exact match can snap to the previous keyframe while
-        // the placeholder head assumes the anchor.
-        if (startTime is > 0)
-        {
-            args.Add("-ss"); args.Add((startTime.Value + 0.01).ToString(CultureInfo.InvariantCulture));
-        }
-        args.Add("-fflags"); args.Add("+genpts");
-        args.Add("-i"); args.Add(input);
+        AppendCopyInputArgs(args, input, startTime);
         args.Add("-map"); args.Add($"0:{video.Index}");
         if (audio != null)
         {
@@ -953,14 +898,7 @@ public class StreamService(
         var segPattern = Path.Combine(tempDir, "%d.ts");
 
         var args = new List<string>();
-        // Input seek before -i (nudged as in StartRemux: stream copy must land
-        // on the anchor keyframe, not the one before it).
-        if (startTime is > 0)
-        {
-            args.Add("-ss"); args.Add((startTime.Value + 0.01).ToString(CultureInfo.InvariantCulture));
-        }
-        args.Add("-fflags"); args.Add("+genpts");
-        args.Add("-i"); args.Add(input);
+        AppendCopyInputArgs(args, input, startTime);
         args.Add("-map"); args.Add($"0:{video.Index}");
         if (audio != null)
         {
